@@ -2,12 +2,19 @@
 extern crate log;
 
 use bytes::BytesMut;
-use tokio::{net::TcpListener, sync::Semaphore, io::{AsyncReadExt, AsyncWriteExt}, time::Instant, fs::File};
+use speedy::Writable;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Mutex, Arc}, time::Duration,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use speedy::Writable;
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::Semaphore,
+    time::Instant,
+};
 
 type Key = u64;
 type Db = Arc<Mutex<HashMap<u64, Vec<u8>>>>;
@@ -20,8 +27,7 @@ async fn serve() {
     let db2 = db.clone();
     let db3 = db.clone();
 
-    let expirations: Arc<Mutex<BTreeMap<Expiration, Key>>> =
-        Arc::new(Mutex::new(BTreeMap::new()));
+    let expirations: Arc<Mutex<BTreeMap<Expiration, Key>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let expirations2 = expirations.clone();
 
     let last_snapshot = Arc::new(Mutex::new(None));
@@ -48,7 +54,6 @@ async fn serve() {
                 let mut expirations_guard = expirations_local.lock().unwrap();
                 expirations_guard.remove(&expiration);
                 drop(expirations_guard);
-                debug!("Expired key {key}");
             }
         }
     });
@@ -64,8 +69,6 @@ async fn serve() {
 
             let data = {
                 let mut db_guard = db_local.lock().unwrap();
-                let keys_count = db_guard.len();
-                info!("Keys count: {keys_count}");
                 db_guard.shrink_to_fit();
                 db_guard.write_to_vec().unwrap()
             };
@@ -81,65 +84,39 @@ async fn serve() {
         }
     });
 
-    tokio::spawn(async {
-        loop {
-            let dur = Duration::from_millis(10);
-            let now = Instant::now();
-            while now.elapsed() < dur {}
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    });
-
-    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
-    info!("Listening on {}", listener.local_addr().unwrap());
+    let listener = TcpListener::bind("0.0.0.0:6379").await.unwrap();
+    info!("Listening on {:?}", listener.local_addr().unwrap());
 
     let semaphore = Arc::new(Semaphore::new(2048));
 
     loop {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        let (mut stream , addr) = listener.accept().await.unwrap();
+        let (mut stream, addr) = listener.accept().await.unwrap();
         let local_db = db.clone();
         let expirations2 = expirations.clone();
-        debug!("Accepted client: {addr:?}");
 
-        tokio::spawn(
-            async move {
-                let mut buf = BytesMut::with_capacity(4 * 1024);
-                loop {
-                    let len = stream.read_buf(&mut buf).await.unwrap();
+        tokio::spawn(async move {
+            let mut buf = BytesMut::with_capacity(4 * 1024);
+            loop {
+                let len = stream.read_buf(&mut buf).await.unwrap();
 
-                    if len == 0 {
-                        debug!("Connection closed");
-                        break;
-                    } else {
-                        // if buf.len() < 1069 && buf.len() != 77 {
-                        //     debug!("Frame not complete (buf len {}), continue", buf.len());
-                        //     continue;
-                        // }
-                        debug!("Buf len: {}", buf.len());
+                if len == 0 {
+                    break;
+                } else {
+                    let key = fastrand::u64(..);
 
-                        let key = fastrand::u64(..);
+                    local_db.lock().unwrap().insert(key, buf.to_vec());
+                    let expire = Instant::now() + Duration::from_secs(KEY_EXPIRE_SEC);
+                    expirations2.lock().unwrap().insert(expire, key);
 
-                        debug!("Writing {key}");
-
-                        local_db.lock().unwrap().insert(key, buf.to_vec());
-                        // db_guard.insert(key, buf);
-                        debug!("Keys in db: {}", local_db.lock().unwrap().len());
-                        // drop(db_guard);
-                        let expire = Instant::now() + Duration::from_secs(KEY_EXPIRE_SEC);
-                        expirations2.lock().unwrap().insert(expire, key);
-                        // queue_guard.insert(expire, key);
-                        // drop(queue_guard);
-
-                        stream.write(b"$-1\r\n").await.unwrap();
-                    }
-
-                    buf.clear();
+                    stream.write(b"$-1\r\n").await.unwrap();
                 }
-                drop(permit);
+
+                buf.clear();
             }
-        );
+            drop(permit);
+        });
     }
 }
 

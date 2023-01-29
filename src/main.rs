@@ -92,7 +92,7 @@ async fn serve() {
     loop {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        let (mut stream, addr) = listener.accept().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
         let local_db = db.clone();
         let expirations2 = expirations.clone();
 
